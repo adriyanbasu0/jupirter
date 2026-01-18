@@ -33,7 +33,7 @@ echo "Running example program..."
 echo ""
 
 # Run the example program and capture exit code
-./target/release/aura build -o out.aura tests/hello_syscall.aura
+./target/release/aura build -o out.aura tests/test_alloc_free.aura
 EXIT_CODE=$?
 echo ""
 echo "Build exit code: $EXIT_CODE"

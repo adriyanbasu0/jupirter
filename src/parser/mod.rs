@@ -1595,9 +1595,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Lt)?;
                 let ty = Box::new(self.parse_type()?);
                 self.expect(TokenKind::Gt)?;
-                self.expect(TokenKind::LParen)?;
                 let size = Box::new(self.parse_expr()?);
-                self.expect(TokenKind::RParen)?;
                 Ok(Expr::Alloc(ty, size))
             }
             TokenKind::Free => {

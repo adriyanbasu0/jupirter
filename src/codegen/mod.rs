@@ -16,6 +16,129 @@ impl fmt::Display for CodegenError {
 
 impl std::error::Error for CodegenError {}
 
+// FEATURE 9: Bit-precise integer type tracking
+#[derive(Debug, Clone, Copy)]
+struct IntType {
+    bits: u8,
+    signed: bool,
+}
+
+impl IntType {
+    fn from_aura_type(ty: &Type) -> Option<Self> {
+        match ty {
+            Type::I8 => Some(IntType {
+                bits: 8,
+                signed: true,
+            }),
+            Type::I16 => Some(IntType {
+                bits: 16,
+                signed: true,
+            }),
+            Type::I32 => Some(IntType {
+                bits: 32,
+                signed: true,
+            }),
+            Type::I64 => Some(IntType {
+                bits: 64,
+                signed: true,
+            }),
+            Type::U8 => Some(IntType {
+                bits: 8,
+                signed: false,
+            }),
+            Type::U16 => Some(IntType {
+                bits: 16,
+                signed: false,
+            }),
+            Type::U32 => Some(IntType {
+                bits: 32,
+                signed: false,
+            }),
+            Type::U64 => Some(IntType {
+                bits: 64,
+                signed: false,
+            }),
+            Type::BitInt(bits, signed) => Some(IntType {
+                bits: *bits,
+                signed: *signed,
+            }),
+            _ => None,
+        }
+    }
+
+    fn from_suffix(suffix: &IntSuffix) -> Option<Self> {
+        match suffix {
+            IntSuffix::I8 => Some(IntType {
+                bits: 8,
+                signed: true,
+            }),
+            IntSuffix::I16 => Some(IntType {
+                bits: 16,
+                signed: true,
+            }),
+            IntSuffix::I32 => Some(IntType {
+                bits: 32,
+                signed: true,
+            }),
+            IntSuffix::I64 => Some(IntType {
+                bits: 64,
+                signed: true,
+            }),
+            IntSuffix::U8 => Some(IntType {
+                bits: 8,
+                signed: false,
+            }),
+            IntSuffix::U16 => Some(IntType {
+                bits: 16,
+                signed: false,
+            }),
+            IntSuffix::U32 => Some(IntType {
+                bits: 32,
+                signed: false,
+            }),
+            IntSuffix::U64 => Some(IntType {
+                bits: 64,
+                signed: false,
+            }),
+            IntSuffix::Usize | IntSuffix::Isize => Some(IntType {
+                bits: 64,
+                signed: false,
+            }),
+            IntSuffix::None => None,
+        }
+    }
+
+    // FEATURE 9: Get minimum storage size in bytes
+    fn storage_size(&self) -> u8 {
+        (self.bits + 7) / 8
+    }
+
+    // FEATURE 9: Get mask to constrain value to bit width
+    fn mask(&self) -> u64 {
+        if self.bits >= 64 {
+            0xFFFFFFFFFFFFFFFF
+        } else {
+            (1u64 << self.bits) - 1
+        }
+    }
+
+    // FEATURE 9: Check if value fits in this type
+    fn fits(&self, val: i64) -> bool {
+        if self.bits >= 64 {
+            return true;
+        }
+
+        if self.signed {
+            let min = -(1i64 << (self.bits - 1));
+            let max = (1i64 << (self.bits - 1)) - 1;
+            val >= min && val <= max
+        } else {
+            let max = (1u64 << self.bits) - 1;
+            val >= 0 && (val as u64) <= max
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AuraObject {
     pub entry_point: u64,
