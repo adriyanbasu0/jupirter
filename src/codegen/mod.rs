@@ -147,6 +147,9 @@ pub struct AuraObject {
     pub bss_size: usize,
     pub relocations: Vec<Relocation>,
     pub symbols: Vec<Symbol>,
+    pub capability_sections: Vec<binary::CapabilitySection>,
+    pub topology_sections: Vec<binary::TopologySection>,
+    pub bit_region_sections: Vec<binary::BitRegionSection>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +179,9 @@ pub enum SymbolKind {
     Function,
     Data,
     Object,
+    Capability,
+    Topology,
+    BitRegion,
 }
 
 pub fn generate(typed_ast: &Program) -> Result<AuraObject, CodegenError> {
@@ -221,6 +227,9 @@ pub fn generate(typed_ast: &Program) -> Result<AuraObject, CodegenError> {
         bss_size: codegen.bss_size,
         relocations: codegen.relocations,
         symbols: codegen.symbols,
+        capability_sections: codegen.capability_sections,
+        topology_sections: codegen.topology_sections,
+        bit_region_sections: codegen.bit_region_sections,
     })
 }
 
@@ -235,6 +244,17 @@ struct CodeGenerator {
     label_positions: HashMap<String, usize>,
     entry_point_name: Option<String>,
     variables: HashMap<String, u64>,
+    capability_sections: Vec<binary::CapabilitySection>,
+    topology_sections: Vec<binary::TopologySection>,
+    bit_region_sections: Vec<binary::BitRegionSection>,
+    // ========== FEATURE 15: Physical Memory Capability Enforcement ==========
+    capability_ranges: HashMap<String, (u64, u64, CapabilityMode)>,
+    // ========== FEATURE 11: Memory Topology Verification ==========
+    topology_constraints: HashMap<String, MemoryTopology>,
+    // ========== FEATURE 5: Entropy Tracking ==========
+    entropy_state: HashMap<String, EntropyState>,
+    // ========== FEATURE 3: Bit-Region Validation ==========
+    validated_bit_regions: HashMap<String, Vec<(u8, u8)>>,
 }
 
 type HashMap<K, V> = std::collections::HashMap<K, V>;
@@ -252,6 +272,17 @@ impl CodeGenerator {
             label_positions: HashMap::new(),
             entry_point_name: None,
             variables: HashMap::new(),
+            capability_sections: Vec::new(),
+            topology_sections: Vec::new(),
+            bit_region_sections: Vec::new(),
+            // ========== FEATURE 15: Physical Memory Capability Enforcement ==========
+            capability_ranges: HashMap::new(),
+            // ========== FEATURE 11: Memory Topology Verification ==========
+            topology_constraints: HashMap::new(),
+            // ========== FEATURE 5: Entropy Tracking ==========
+            entropy_state: HashMap::new(),
+            // ========== FEATURE 3: Bit-Region Validation ==========
+            validated_bit_regions: HashMap::new(),
         }
     }
 
@@ -264,6 +295,120 @@ impl CodeGenerator {
                 self.generate_const_item(c)?;
             }
             Item::Var(v) => self.generate_var_item(v)?,
+            // FEATURE 15: Handle capability declarations with validation
+            Item::CapabilityDecl(c) => {
+                self.validate_capability_range(&c.name, c.base_address, c.length, c.mode.clone())?;
+                let end_address = c.base_address.saturating_add(c.length);
+                self.capability_ranges.insert(
+                    c.name.clone(),
+                    (c.base_address, end_address, c.mode.clone()),
+                );
+                let element_size = c.element_type.as_ref().map_or(0, |t| t.size() as u32);
+                let element_count = if element_size > 0 {
+                    c.length / element_size as u64
+                } else {
+                    1
+                };
+                let mode = match c.mode {
+                    CapabilityMode::Read => 0,
+                    CapabilityMode::Write => 1,
+                    CapabilityMode::ReadWrite => 2,
+                    CapabilityMode::Execute => 3,
+                };
+                self.capability_sections.push(binary::CapabilitySection {
+                    name: c.name.clone(),
+                    base_address: c.base_address,
+                    length: c.length,
+                    mode,
+                    element_size,
+                    element_count,
+                });
+                self.symbols.push(Symbol {
+                    name: c.name.clone(),
+                    offset: c.base_address,
+                    size: c.length,
+                    kind: SymbolKind::Capability,
+                });
+            }
+            // FEATURE 11: Handle topology declarations with validation
+            Item::TopologyDecl(t) => {
+                self.topology_constraints
+                    .insert(t.name.clone(), t.topology.clone());
+                let cache_level = match t.topology.cache_level {
+                    Some(CacheLevel::L1) => 1,
+                    Some(CacheLevel::L2) => 2,
+                    Some(CacheLevel::L3) => 3,
+                    Some(CacheLevel::L4) => 4,
+                    None => 0,
+                };
+                let memory_class = match t.topology.memory_class {
+                    Some(MemoryClass::Device) => 1,
+                    Some(MemoryClass::DMA) => 2,
+                    Some(MemoryClass::DMAcoherent) => 3,
+                    Some(MemoryClass::Framebuffer) => 4,
+                    Some(MemoryClass::Encrypted) => 5,
+                    Some(MemoryClass::Normal) => 0,
+                    None => 0,
+                };
+                self.topology_sections.push(binary::TopologySection {
+                    name: t.name.clone(),
+                    numa_node: t.topology.numa_node.unwrap_or(0xFF),
+                    cache_level,
+                    memory_class,
+                });
+                self.symbols.push(Symbol {
+                    name: t.name.clone(),
+                    offset: 0,
+                    size: 0,
+                    kind: SymbolKind::Topology,
+                });
+            }
+            // FEATURE 3: Handle bit-region declarations with validation
+            Item::BitRegionDecl(b) => {
+                // FEATURE 3: Validate bit region declarations
+                self.validate_bitregion_decl(&b.name, &b.base_type, &b.regions)?;
+                let base_type_str = format!("{:?}", b.base_type);
+                let region_tuples: Vec<(String, u8, u8, BitAccess)> = b
+                    .regions
+                    .iter()
+                    .map(|r| (r.name.clone(), r.bit_offset, r.bit_width, r.access.clone()))
+                    .collect();
+                let mut regions = Vec::new();
+                for r in &b.regions {
+                    let access = match r.access {
+                        BitAccess::ReadOnly => 0,
+                        BitAccess::WriteOnly => 1,
+                        BitAccess::ReadWrite => 2,
+                    };
+                    regions.push(binary::BitRegionInfo {
+                        name: r.name.clone(),
+                        bit_offset: r.bit_offset,
+                        bit_width: r.bit_width,
+                        access,
+                    });
+                }
+                self.bit_region_sections.push(binary::BitRegionSection {
+                    name: b.name.clone(),
+                    base_type: base_type_str,
+                    regions,
+                });
+                self.symbols.push(Symbol {
+                    name: b.name.clone(),
+                    offset: 0,
+                    size: b.base_type.size() as u64,
+                    kind: SymbolKind::BitRegion,
+                });
+            }
+            // FEATURE 5: Handle entropy declarations
+            Item::EntropyDecl(e) => {
+                self.entropy_state
+                    .insert(e.name.clone(), e.initial_entropy.clone());
+                if e.initial_entropy == EntropyState::Initialized {
+                    let offset = self.data.len();
+                    self.data.extend_from_slice(&0u64.to_le_bytes());
+                    self.variables.insert(e.name.clone(), offset as u64);
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -280,6 +425,9 @@ impl CodeGenerator {
                     size: 8,
                     kind: SymbolKind::Data,
                 });
+                // FEATURE 5: Constants are initialized
+                self.entropy_state
+                    .insert(c.name.clone(), EntropyState::Initialized);
             }
             Expr::Literal(Literal::String(bytes)) => {
                 let offset = self.data.len();
@@ -291,14 +439,20 @@ impl CodeGenerator {
                     size: bytes.len() as u64,
                     kind: SymbolKind::Data,
                 });
+                // FEATURE 5: String constants are initialized
+                self.entropy_state
+                    .insert(c.name.clone(), EntropyState::Initialized);
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn generate_var_item(&mut self, _v: &VarDecl) -> Result<(), CodegenError> {
+    fn generate_var_item(&mut self, v: &VarDecl) -> Result<(), CodegenError> {
         self.bss_size += 8;
+        // FEATURE 5: Variables are uninitialized by default
+        self.entropy_state
+            .insert(v.name.clone(), EntropyState::Uninitialized);
         Ok(())
     }
 
@@ -392,11 +546,15 @@ impl CodeGenerator {
     }
 
     fn generate_let(&mut self, l: &LetStmt) -> Result<(), CodegenError> {
-        let value_type = match &*l.value {
+        // FEATURE 5: Track entropy state for the variable
+        match &*l.value {
             Expr::Literal(Literal::Int(val, _)) => {
                 let offset = self.data.len();
                 self.data.extend_from_slice(&val.to_le_bytes());
                 self.variables.insert(l.name.clone(), offset as u64);
+                // FEATURE 5: Literals are initialized
+                self.entropy_state
+                    .insert(l.name.clone(), EntropyState::Initialized);
                 return Ok(());
             }
             Expr::Identifier(name) => {
@@ -411,25 +569,34 @@ impl CodeGenerator {
                 }
                 // Now RAX holds the value, store it
                 let offset = self.data.len();
-                self.data.extend_from_slice(&[0u8; 8]); // Assume 8 bytes for now
+                self.data.extend_from_slice(&[0u8; 8]);
                 let var_addr = self.get_data_address(offset);
                 self.mov_r10_immediate(var_addr);
                 self.mov_rax_to_r10_mem();
                 self.variables.insert(l.name.clone(), offset as u64);
+                // FEATURE 5: Inherit entropy from source variable
+                let inherited_state = self
+                    .entropy_state
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(EntropyState::Initialized);
+                self.entropy_state.insert(l.name.clone(), inherited_state);
                 return Ok(());
             }
-            _ => self.generate_expr(&l.value)?,
+            _ => {
+                // FEATURE 5: Generate expression and track resulting entropy
+                let _state = self.generate_expr(&l.value)?;
+                // Store the entropy state for this variable
+                self.entropy_state.insert(l.name.clone(), _state);
+            }
         };
-
-        // If the expression was not a literal or identifier, its result is in RAX.
-        // Store it in the data section.
+        // Store result in data section
         let offset = self.data.len();
-        self.data.extend_from_slice(&[0u8; 8]); // Reserve 8 bytes for the result
+        self.data.extend_from_slice(&[0u8; 8]);
         let var_addr = self.get_data_address(offset);
         self.mov_r10_immediate(var_addr);
         self.mov_rax_to_r10_mem();
         self.variables.insert(l.name.clone(), offset as u64);
-
         Ok(())
     }
 
@@ -456,26 +623,22 @@ impl CodeGenerator {
         Ok(())
     }
 
-    fn generate_expr(&mut self, expr: &Expr) -> Result<u64, CodegenError> {
+    fn generate_expr(&mut self, expr: &Expr) -> Result<EntropyState, CodegenError> {
         match expr {
             Expr::Literal(Literal::Int(val, int_suffix)) => {
                 let int_type = IntType::from_suffix(int_suffix);
 
-                // FEATURE 9: Check if literal fits in type and apply mask
                 if let Some(int_type) = int_type {
                     if !int_type.fits(*val) {
                         return Err(CodegenError {
                             message: format!("Integer literal {} does not fit in type", val),
                         });
                     }
-                    // Apply mask to constrain to bit width
                     let masked = *val as u64 & int_type.mask();
-                    // FEATURE 9: Emit width-aware immediate value
                     self.emit_width_immediate(masked, int_type.bits);
-                    Ok(masked)
+                    Ok(EntropyState::Initialized)
                 } else {
-                    // No type suffix, emit full width
-                    Ok(*val as u64)
+                    Ok(EntropyState::Initialized)
                 }
             }
             Expr::Identifier(name) => {
@@ -485,51 +648,176 @@ impl CodeGenerator {
                     .find(|s| s.name == *name && s.kind == SymbolKind::Data)
                 {
                     self.mov_rax_from_mem(sym.offset as u64);
-                    return Ok(0);
-                }
-                if let Some(&offset) = self.variables.get(name) {
+                } else if let Some(&offset) = self.variables.get(name) {
                     let addr = self.get_data_address(offset as usize);
                     self.mov_r10_immediate(addr);
                     self.mov_rax_from_r10();
-                    return Ok(0);
                 }
-                Ok(0)
+                let state = self
+                    .entropy_state
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(EntropyState::Initialized);
+                Ok(state)
             }
             Expr::Syscall(method_name, args) => {
+                // FEATURE 5: Check entropy before syscall
+                self.check_syscall_entropy(args)?;
                 self.generate_syscall(method_name, args)?;
-                Ok(0)
+                Ok(EntropyState::Initialized)
             }
-            // FEATURE 1: Explicit memory allocation
             Expr::Alloc(ty, count) => {
-                let size = self.generate_expr(count)?;
-                // Put count in rdi
+                let _size_state = self.generate_expr(count)?;
+                let size = self.eval_expr_to_u64(count)?;
+                self.validate_allocation_topology(ty, None)?;
                 self.mov_rdi_immediate(size);
-                // Call __aura_alloc
                 self.call_external("__aura_alloc");
-                Ok(0)
+                Ok(EntropyState::Uninitialized)
             }
-            // FEATURE 1: Explicit memory deallocation
             Expr::Free(ptr, size) => {
-                let _ = self.generate_expr(ptr)?;
-                // ptr is in rax, move to rdi
+                let _ptr_state = self.generate_expr(ptr)?;
+                let _size_state = self.generate_expr(size)?;
+                self.eval_expr_to_u64(ptr)?;
                 self.mov_rdi_rax();
-                let size_val = self.generate_expr(size)?;
-                self.mov_rsi_immediate(size_val);
-                // Call __aura_free
+                self.eval_expr_to_u64(size)?;
+                self.mov_rsi_immediate(8);
                 self.call_external("__aura_free");
-                Ok(0)
+                Ok(EntropyState::Initialized)
             }
-            // FEATURE 8: Explicit cast with type checking
             Expr::Cast(expr, target_type) => {
-                // FEATURE 8: Generate source expression
-                let _ = self.generate_expr(expr)?;
-                // Check if cast is allowed (only explicit Cast nodes)
-                // Emit appropriate conversion for target type
+                // FEATURE 11: Check topology cast validity
+                if let Type::Topology(topology, _) = target_type {
+                    self.validate_topology_cast(
+                        None,
+                        topology
+                            .topology
+                            .memory_class
+                            .clone()
+                            .unwrap_or(MemoryClass::Normal),
+                    )?;
+                }
+                let _state = self.generate_expr(expr)?;
                 self.generate_cast_conversion(target_type)?;
-                Ok(0)
+                Ok(EntropyState::Initialized)
             }
-            _ => Ok(0),
+            Expr::PhysAddr(phys_addr) => {
+                let offset_val = 0;
+                self.check_capability_access(offset_val, &phys_addr.base_address.to_string())?;
+                Ok(EntropyState::Initialized)
+            }
+            Expr::BitRegionAccess(br) => {
+                let _base_state = self.generate_expr(&br.base)?;
+                if let Expr::Identifier(name) = &*br.base {
+                    if let Some(regions) = self.validated_bit_regions.get(name) {
+                        let _region = regions
+                            .iter()
+                            .find(|(o, w)| format!("{}_{}", o, w) == br.region_name);
+                    }
+                }
+                Ok(EntropyState::Initialized)
+            }
+            Expr::Deref(ptr) => {
+                let ptr_state = self.generate_expr(ptr)?;
+                self.check_mmio_entropy(ptr_state, "memory")?;
+                Ok(EntropyState::Initialized)
+            }
+            Expr::Binary(op, left, right) => {
+                let left_state = self.generate_expr(left)?;
+                let right_state = self.generate_expr(right)?;
+                match op {
+                    BinaryOp::Add => self.add_rax_rdx(),
+                    BinaryOp::Sub => self.sub_rax_rdx(),
+                    BinaryOp::Mul => self.imul_rax_rdx(),
+                    BinaryOp::Div => self.idiv_rdx(),
+                    BinaryOp::Mod => self.idiv_rdx(),
+                    BinaryOp::LShift => self.shl_rax_cl(),
+                    BinaryOp::RShift => self.shr_rax_cl(),
+                    BinaryOp::BitAnd => self.and_rax_rdx(),
+                    BinaryOp::BitOr => self.or_rax_rdx(),
+                    BinaryOp::BitXor => self.xor_rax_rdx(),
+                    _ => {}
+                }
+                Ok(self.propagate_entropy(left_state, right_state))
+            }
+            Expr::Unary(op, operand) => {
+                let state = self.generate_expr(operand)?;
+                match op {
+                    UnaryOp::Neg => self.neg_rax(),
+                    UnaryOp::Not | UnaryOp::BitNot => self.not_rax(),
+                    UnaryOp::Deref => {}
+                    UnaryOp::AddrOf => {}
+                }
+                Ok(state)
+            }
+            _ => Ok(EntropyState::Initialized),
         }
+    }
+
+    fn neg_rax(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0xf7);
+        self.text.push(0xd8);
+    }
+
+    fn not_rax(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0xf7);
+        self.text.push(0xd0);
+    }
+
+    fn add_rax_rdx(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0x01);
+        self.text.push(0xc2);
+    }
+
+    fn sub_rax_rdx(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0x29);
+        self.text.push(0xc2);
+    }
+
+    fn imul_rax_rdx(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0x0f);
+        self.text.push(0xaf);
+        self.text.push(0xc2);
+    }
+
+    fn idiv_rdx(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0xf7);
+        self.text.push(0xfe);
+    }
+
+    fn shl_rax_cl(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0xd3);
+        self.text.push(0xe0);
+    }
+
+    fn shr_rax_cl(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0xd3);
+        self.text.push(0xe8);
+    }
+
+    fn and_rax_rdx(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0x21);
+        self.text.push(0xc2);
+    }
+
+    fn or_rax_rdx(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0x09);
+        self.text.push(0xc2);
+    }
+
+    fn xor_rax_rdx(&mut self) {
+        self.text.push(0x48);
+        self.text.push(0x31);
+        self.text.push(0xc2);
     }
 
     fn mov_rax_immediate(&mut self, val: u64) {
@@ -711,22 +999,55 @@ impl CodeGenerator {
         self.text.push(0x05);
     }
 
+    // Helper function to evaluate expression to u64 value
+    fn eval_expr_to_u64(&mut self, expr: &Expr) -> Result<u64, CodegenError> {
+        match expr {
+            Expr::Literal(Literal::Int(val, int_suffix)) => {
+                let int_type = IntType::from_suffix(int_suffix);
+                if let Some(int_type) = int_type {
+                    if !int_type.fits(*val) {
+                        return Err(CodegenError {
+                            message: format!("Integer literal {} does not fit in type", val),
+                        });
+                    }
+                    Ok(*val as u64 & int_type.mask())
+                } else {
+                    Ok(*val as u64)
+                }
+            }
+            Expr::Identifier(name) => {
+                if let Some(sym) = self
+                    .symbols
+                    .iter()
+                    .find(|s| s.name == *name && s.kind == SymbolKind::Data)
+                {
+                    self.mov_rax_from_mem(sym.offset as u64);
+                    return Ok(0);
+                }
+                if let Some(&offset) = self.variables.get(name) {
+                    let addr = self.get_data_address(offset as usize);
+                    self.mov_r10_immediate(addr);
+                    self.mov_rax_from_r10();
+                    return Ok(0);
+                }
+                Ok(0)
+            }
+            _ => Ok(0),
+        }
+    }
+
     // FEATURE 1: Emit alloc<T>(count) - puts result in rax
     fn emit_alloc(&mut self, count_expr: &Expr) -> Result<(), CodegenError> {
-        let count = self.generate_expr(count_expr)?;
-        // Put count in rdi
+        let count = self.eval_expr_to_u64(count_expr)?;
         self.mov_rdi_immediate(count);
-        // Call __aura_alloc(count)
         self.call_external("__aura_alloc");
         Ok(())
     }
 
-    // FEATURE 1: Emit free(ptr) - takes ptr from rax/rax
+    // FEATURE 1: Emit free(ptr) - takes ptr from rax
     fn emit_free(&mut self, ptr_expr: &Expr) -> Result<(), CodegenError> {
-        let _ = self.generate_expr(ptr_expr)?;
-        // ptr is in rax, move to rdi
+        let _ = self.eval_expr_to_u64(ptr_expr)?;
         self.mov_rdi_rax();
-        // Call __aura_free(ptr)
         self.call_external("__aura_free");
         Ok(())
     }
@@ -841,7 +1162,6 @@ impl CodeGenerator {
     // FEATURE 9: Apply mask to rax for bit-precise types
     fn mask_rax(&mut self, bits: u8) {
         if bits < 64 {
-            // and rax, mask
             let mask = if bits >= 63 {
                 u64::MAX
             } else {
@@ -851,5 +1171,261 @@ impl CodeGenerator {
             self.text.push(0x25);
             self.text.extend_from_slice(&mask.to_le_bytes());
         }
+    }
+
+    // ========== FEATURE 15: Physical Memory Capability Enforcement ==========
+    fn check_capability_access(&self, _addr: u64, _capability: &str) -> Result<(), CodegenError> {
+        if let Some((base, length, mode)) = self.capability_ranges.get(_capability) {
+            if _addr < *base || _addr >= *base + *length {
+                return Err(CodegenError {
+                    message: format!(
+                        "Capability access violation: address 0x{:x} outside capability range [0x{:x}, 0x{:x})",
+                        _addr, base, base + length
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_capability_range(
+        &self,
+        name: &str,
+        base: u64,
+        length: u64,
+        mode: CapabilityMode,
+    ) -> Result<(), CodegenError> {
+        if length == 0 {
+            return Err(CodegenError {
+                message: format!("Capability '{}' has zero length", name),
+            });
+        }
+        if let Some((_, _, existing_mode)) = self.capability_ranges.get(name) {
+            if existing_mode != &mode {
+                return Err(CodegenError {
+                    message: format!(
+                        "Capability '{}' redeclared with different mode: {:?} vs {:?}",
+                        name, mode, existing_mode
+                    ),
+                });
+            }
+        }
+        for (other_name, (other_base, other_length, _)) in &self.capability_ranges {
+            if other_name != name {
+                let other_end = *other_base + *other_length;
+                let this_end = base + length;
+                if base < other_end && this_end > *other_base {
+                    return Err(CodegenError {
+                        message: format!(
+                            "Capability '{}' overlaps with capability '{}'",
+                            name, other_name
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ========== FEATURE 11: Memory Topology Verification ==========
+    fn validate_topology_cast(
+        &self,
+        source_topology: Option<&MemoryTopology>,
+        target_class: MemoryClass,
+    ) -> Result<(), CodegenError> {
+        if let Some(topology) = source_topology {
+            if let Some(mem_class) = &topology.memory_class {
+                if *mem_class == MemoryClass::Device && target_class == MemoryClass::Encrypted {
+                    return Err(CodegenError {
+                        message: "Cannot cast Device memory to Encrypted memory".to_string(),
+                    });
+                }
+                if *mem_class == MemoryClass::Encrypted && target_class == MemoryClass::Device {
+                    return Err(CodegenError {
+                        message: "Cannot cast Encrypted memory to Device memory".to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_allocation_topology(
+        &self,
+        _ty: &Type,
+        numa_node: Option<u8>,
+    ) -> Result<(), CodegenError> {
+        if let Some(node) = numa_node {
+            if node > 255 {
+                return Err(CodegenError {
+                    message: format!("Invalid NUMA node: {}", node),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    // ========== FEATURE 5: Entropy Propagation ==========
+    fn propagate_entropy(&self, left: EntropyState, right: EntropyState) -> EntropyState {
+        match (left, right) {
+            (EntropyState::Uninitialized, _) | (_, EntropyState::Uninitialized) => {
+                EntropyState::Uninitialized
+            }
+            (EntropyState::Tainted, _) | (_, EntropyState::Tainted) => EntropyState::Tainted,
+            (EntropyState::Partial(bits1), EntropyState::Partial(bits2)) => {
+                let merged: Vec<BitState> = bits1
+                    .iter()
+                    .zip(bits2.iter())
+                    .map(|(a, b)| match (a, b) {
+                        (BitState::Initialized(true), BitState::Initialized(true)) => {
+                            BitState::Initialized(true)
+                        }
+                        _ => BitState::Tainted,
+                    })
+                    .collect();
+                EntropyState::Partial(merged)
+            }
+            (EntropyState::Partial(bits), EntropyState::Initialized)
+            | (EntropyState::Initialized, EntropyState::Partial(bits)) => {
+                EntropyState::Partial(bits)
+            }
+            (EntropyState::Initialized, EntropyState::Initialized) => EntropyState::Initialized,
+        }
+    }
+
+    fn check_syscall_entropy(&self, args: &[Expr]) -> Result<(), CodegenError> {
+        for arg in args {
+            if let Expr::Identifier(name) = arg {
+                if let Some(state) = self.entropy_state.get(name) {
+                    if *state == EntropyState::Uninitialized {
+                        return Err(CodegenError {
+                            message: format!(
+                                "Syscall argument '{}' is uninitialized - this could expose sensitive data",
+                                name
+                            ),
+                        });
+                    }
+                    if *state == EntropyState::Tainted {
+                        return Err(CodegenError {
+                            message: format!(
+                                "Syscall argument '{}' is tainted - unsafe for system calls",
+                                name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_mmio_entropy(&self, _value: EntropyState, _region: &str) -> Result<(), CodegenError> {
+        if _value == EntropyState::Uninitialized {
+            return Err(CodegenError {
+                message: format!(
+                    "Cannot write uninitialized value to MMIO region '{}'",
+                    _region
+                ),
+            });
+        }
+        if _value == EntropyState::Tainted {
+            return Err(CodegenError {
+                message: format!(
+                    "Cannot write tainted value to MMIO region '{}' - security risk",
+                    _region
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    // ========== FEATURE 3: Bit-Region Validation ==========
+    fn validate_bit_ranges(
+        &self,
+        _base_type: &Type,
+        regions: &[(u8, u8, &str)],
+    ) -> Result<(), CodegenError> {
+        let type_bits = match _base_type {
+            Type::I8 | Type::U8 => 8,
+            Type::I16 | Type::U16 => 16,
+            Type::I32 | Type::U32 => 32,
+            Type::I64 | Type::U64 => 64,
+            Type::BitInt(bits, _) => *bits,
+            _ => {
+                return Err(CodegenError {
+                    message: format!("Cannot define bit regions on non-integer type"),
+                })
+            }
+        };
+        for (offset, width, _name) in regions {
+            if *offset >= type_bits {
+                return Err(CodegenError {
+                    message: format!(
+                        "Bit region '{}' offset {} exceeds type width of {} bits",
+                        _name, offset, type_bits
+                    ),
+                });
+            }
+            if *width == 0 {
+                return Err(CodegenError {
+                    message: format!("Bit region '{}' has zero width", _name),
+                });
+            }
+            if *offset + *width > type_bits {
+                return Err(CodegenError {
+                    message: format!(
+                        "Bit region '{}' [{}, {}) exceeds type width of {} bits",
+                        _name,
+                        offset,
+                        offset + width,
+                        type_bits
+                    ),
+                });
+            }
+        }
+        let mut sorted: Vec<_> = regions.iter().collect();
+        sorted.sort_by_key(|r| r.0);
+        for i in 0..sorted.len().saturating_sub(1) {
+            let (offset1, width1, _) = sorted[i];
+            let (offset2, width2, _) = sorted[i + 1];
+            if offset1 + width1 > *offset2 {
+                return Err(CodegenError {
+                    message: format!(
+                        "Bit regions overlap: [{}, {}) and [{}, {})",
+                        offset1,
+                        offset1 + width1,
+                        offset2,
+                        offset2 + width2
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_bitregion_decl(
+        &mut self,
+        name: &str,
+        base_type: &Type,
+        regions: &[BitRegion],
+    ) -> Result<(), CodegenError> {
+        if let Some(existing) = self.validated_bit_regions.get(name) {
+            return Err(CodegenError {
+                message: format!("Bit region '{}' already defined", name),
+            });
+        }
+        let region_tuples: Vec<(u8, u8, &str)> = regions
+            .iter()
+            .map(|r| (r.bit_offset, r.bit_width, r.name.as_str()))
+            .collect();
+        self.validate_bit_ranges(base_type, &region_tuples)?;
+        self.validated_bit_regions.insert(
+            name.to_string(),
+            regions
+                .iter()
+                .map(|r| (r.bit_offset, r.bit_width))
+                .collect(),
+        );
+        Ok(())
     }
 }

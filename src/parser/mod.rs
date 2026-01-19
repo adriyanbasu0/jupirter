@@ -78,6 +78,10 @@ impl<'a> Parser<'a> {
             TokenKind::Enum => self.parse_enum(),
             TokenKind::Const => self.parse_const_decl(),
             TokenKind::Var => self.parse_var_decl(),
+            TokenKind::Capability => self.parse_capability_decl(),
+            TokenKind::Topology => self.parse_topology_decl(),
+            TokenKind::BitRegion => self.parse_bitregion_decl(),
+            TokenKind::Entropy => self.parse_entropy_decl(),
             TokenKind::At => {
                 self.pos += 1;
                 match self.current() {
@@ -405,7 +409,11 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::RBrace)?;
 
-        Ok(Item::Struct(Struct { name, fields }))
+        Ok(Item::Struct(Struct {
+            name,
+            fields,
+            topology: None,
+        }))
     }
 
     fn parse_union(&mut self) -> Result<Item, ParseError> {
@@ -1671,5 +1679,443 @@ impl<'a> Parser<'a> {
             then_expr,
             else_expr,
         })))
+    }
+
+    fn parse_capability_decl(&mut self) -> Result<Item, ParseError> {
+        self.expect(TokenKind::Capability)?;
+
+        let name = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier,
+                ..
+            }) => {
+                let name = self.tokens[self.pos].text.clone();
+                self.pos += 1;
+                name
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "Expected capability name".to_string(),
+                    span: self
+                        .current()
+                        .map(|t| (t.span.start, t.span.end))
+                        .unwrap_or((0, 0)),
+                });
+            }
+        };
+
+        self.expect(TokenKind::Colon)?;
+
+        self.expect(TokenKind::PAddr)?;
+        self.expect(TokenKind::LParen)?;
+
+        let base_address = match self.current() {
+            Some(Token {
+                kind: TokenKind::HexInteger,
+                ..
+            }) => {
+                let s = self.tokens[self.pos].text.clone();
+                let val = u64::from_str_radix(&s[2..].replace("_", ""), 16).unwrap_or(0);
+                self.pos += 1;
+                val
+            }
+            Some(Token {
+                kind: TokenKind::Integer,
+                ..
+            }) => {
+                let s = self.tokens[self.pos].text.clone();
+                let val: u64 = s.parse().unwrap_or(0);
+                self.pos += 1;
+                val
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "Expected base address".to_string(),
+                    span: self
+                        .current()
+                        .map(|t| (t.span.start, t.span.end))
+                        .unwrap_or((0, 0)),
+                });
+            }
+        };
+
+        self.expect(TokenKind::RParen)?;
+
+        self.expect(TokenKind::LBracket)?;
+
+        let mut length: u64 = match self.current() {
+            Some(Token {
+                kind: TokenKind::Integer,
+                ..
+            }) => {
+                let s = self.tokens[self.pos].text.clone();
+                let val: u64 = s.parse().unwrap_or(0);
+                self.pos += 1;
+                val
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "Expected length".to_string(),
+                    span: self
+                        .current()
+                        .map(|t| (t.span.start, t.span.end))
+                        .unwrap_or((0, 0)),
+                });
+            }
+        };
+
+        if let TokenKind::KiB = self.current_kind() {
+            self.pos += 1;
+            length = length * 1024;
+        } else if let TokenKind::MiB = self.current_kind() {
+            self.pos += 1;
+            length = length * 1024 * 1024;
+        } else if let TokenKind::GiB = self.current_kind() {
+            self.pos += 1;
+            length = length * 1024 * 1024 * 1024;
+        } else if let TokenKind::TiB = self.current_kind() {
+            self.pos += 1;
+            length = length * 1024 * 1024 * 1024 * 1024;
+        } else if let TokenKind::PiB = self.current_kind() {
+            self.pos += 1;
+            length = length * 1024 * 1024 * 1024 * 1024 * 1024;
+        }
+
+        self.expect(TokenKind::RBracket)?;
+
+        self.expect(TokenKind::Colon)?;
+
+        let mode = if self.current_kind() == TokenKind::Identifier {
+            let mode_name = self.tokens[self.pos].text.clone();
+            self.pos += 1;
+            match mode_name.as_str() {
+                "r" => CapabilityMode::Read,
+                "w" => CapabilityMode::Write,
+                "rw" => CapabilityMode::ReadWrite,
+                "x" => CapabilityMode::Execute,
+                _ => CapabilityMode::ReadWrite,
+            }
+        } else {
+            CapabilityMode::ReadWrite
+        };
+
+        self.expect(TokenKind::Semi)?;
+
+        Ok(Item::CapabilityDecl(CapabilityDecl {
+            name,
+            base_address,
+            length,
+            mode,
+            element_type: None,
+        }))
+    }
+
+    fn parse_topology_decl(&mut self) -> Result<Item, ParseError> {
+        self.expect(TokenKind::Topology)?;
+
+        let name = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier,
+                ..
+            }) => {
+                let name = self.tokens[self.pos].text.clone();
+                self.pos += 1;
+                name
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "Expected topology name".to_string(),
+                    span: self
+                        .current()
+                        .map(|t| (t.span.start, t.span.end))
+                        .unwrap_or((0, 0)),
+                });
+            }
+        };
+
+        self.expect(TokenKind::Colon)?;
+
+        let mut topology = MemoryTopology {
+            numa_node: None,
+            cache_level: None,
+            memory_class: None,
+            coherency: None,
+        };
+
+        loop {
+            if self.current_kind() == TokenKind::Numa {
+                self.pos += 1;
+                self.expect(TokenKind::LParen)?;
+                match self.current() {
+                    Some(Token {
+                        kind: TokenKind::Integer,
+                        ..
+                    }) => {
+                        let s = self.tokens[self.pos].text.clone();
+                        let node: u8 = s.parse().unwrap_or(0);
+                        self.pos += 1;
+                        topology.numa_node = Some(node);
+                    }
+                    _ => {
+                        return Err(ParseError {
+                            message: "Expected NUMA node number".to_string(),
+                            span: self
+                                .current()
+                                .map(|t| (t.span.start, t.span.end))
+                                .unwrap_or((0, 0)),
+                        });
+                    }
+                };
+                self.expect(TokenKind::RParen)?;
+            } else if let TokenKind::Cache = self.current_kind() {
+                self.pos += 1;
+                self.expect(TokenKind::LParen)?;
+                let level = match self.current() {
+                    Some(Token {
+                        kind: TokenKind::Identifier,
+                        ..
+                    }) => {
+                        let level_name = self.tokens[self.pos].text.clone();
+                        self.pos += 1;
+                        match level_name.as_str() {
+                            "L1" => Some(CacheLevel::L1),
+                            "L2" => Some(CacheLevel::L2),
+                            "L3" => Some(CacheLevel::L3),
+                            "L4" => Some(CacheLevel::L4),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                self.expect(TokenKind::RParen)?;
+                topology.cache_level = level;
+            } else if let TokenKind::Memory = self.current_kind() {
+                self.pos += 1;
+                self.expect(TokenKind::LParen)?;
+                let mem_class = match self.current() {
+                    Some(Token {
+                        kind: TokenKind::Identifier,
+                        ..
+                    }) => {
+                        let class_name = self.tokens[self.pos].text.clone();
+                        self.pos += 1;
+                        match class_name.as_str() {
+                            "Device" => Some(MemoryClass::Device),
+                            "DMA" => Some(MemoryClass::DMA),
+                            "DMAcoherent" => Some(MemoryClass::DMAcoherent),
+                            "Framebuffer" => Some(MemoryClass::Framebuffer),
+                            "Encrypted" => Some(MemoryClass::Encrypted),
+                            "Normal" => Some(MemoryClass::Normal),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                self.expect(TokenKind::RParen)?;
+                topology.memory_class = mem_class;
+            } else {
+                break;
+            }
+
+            if self.current_kind() == TokenKind::Semi {
+                self.pos += 1;
+                if self.current_kind() == TokenKind::Semi {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        if self.current_kind() == TokenKind::Semi {
+            self.pos += 1;
+        }
+
+        Ok(Item::TopologyDecl(TopologyDecl { name, topology }))
+    }
+
+    fn parse_bitregion_decl(&mut self) -> Result<Item, ParseError> {
+        self.expect(TokenKind::BitRegion)?;
+
+        let name = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier,
+                ..
+            }) => {
+                let name = self.tokens[self.pos].text.clone();
+                self.pos += 1;
+                name
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "Expected bitregion name".to_string(),
+                    span: self
+                        .current()
+                        .map(|t| (t.span.start, t.span.end))
+                        .unwrap_or((0, 0)),
+                });
+            }
+        };
+
+        self.expect(TokenKind::Colon)?;
+
+        let base_type = Box::new(self.parse_type()?);
+
+        self.expect(TokenKind::LBrace)?;
+        let mut regions = Vec::new();
+
+        while self.current_kind() != TokenKind::RBrace {
+            let region_name = match self.current() {
+                Some(Token {
+                    kind: TokenKind::Identifier,
+                    ..
+                }) => {
+                    let r = self.tokens[self.pos].text.clone();
+                    self.pos += 1;
+                    r
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "Expected region name".to_string(),
+                        span: self
+                            .current()
+                            .map(|t| (t.span.start, t.span.end))
+                            .unwrap_or((0, 0)),
+                    });
+                }
+            };
+
+            self.expect(TokenKind::Colon)?;
+
+            self.expect(TokenKind::Bits)?;
+            self.expect(TokenKind::LBracket)?;
+
+            let bit_offset = match self.current() {
+                Some(Token {
+                    kind: TokenKind::Integer,
+                    ..
+                }) => {
+                    let s = self.tokens[self.pos].text.clone();
+                    let val: u8 = s.parse().unwrap_or(0);
+                    self.pos += 1;
+                    val
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "Expected bit offset".to_string(),
+                        span: self
+                            .current()
+                            .map(|t| (t.span.start, t.span.end))
+                            .unwrap_or((0, 0)),
+                    });
+                }
+            };
+
+            self.expect(TokenKind::Dot)?;
+            self.expect(TokenKind::Dot)?;
+
+            let bit_width = match self.current() {
+                Some(Token {
+                    kind: TokenKind::Integer,
+                    ..
+                }) => {
+                    let s = self.tokens[self.pos].text.clone();
+                    let val: u8 = s.parse().unwrap_or(1);
+                    self.pos += 1;
+                    val
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "Expected bit width".to_string(),
+                        span: self
+                            .current()
+                            .map(|t| (t.span.start, t.span.end))
+                            .unwrap_or((0, 0)),
+                    });
+                }
+            };
+
+            self.expect(TokenKind::RBracket)?;
+
+            let access = if self.current_kind() == TokenKind::Identifier {
+                let acc_name = self.tokens[self.pos].text.clone();
+                self.pos += 1;
+                match acc_name.as_str() {
+                    "r" => BitAccess::ReadOnly,
+                    "w" => BitAccess::WriteOnly,
+                    "rw" => BitAccess::ReadWrite,
+                    _ => BitAccess::ReadWrite,
+                }
+            } else {
+                BitAccess::ReadWrite
+            };
+
+            self.expect(TokenKind::Semi)?;
+
+            regions.push(BitRegion {
+                name: region_name,
+                bit_offset,
+                bit_width,
+                access,
+            });
+        }
+
+        self.expect(TokenKind::RBrace)?;
+
+        Ok(Item::BitRegionDecl(BitRegionDecl {
+            name,
+            base_type,
+            regions,
+        }))
+    }
+
+    fn parse_entropy_decl(&mut self) -> Result<Item, ParseError> {
+        self.expect(TokenKind::Entropy)?;
+
+        let name = match self.current() {
+            Some(Token {
+                kind: TokenKind::Identifier,
+                ..
+            }) => {
+                let n = self.tokens[self.pos].text.clone();
+                self.pos += 1;
+                n
+            }
+            _ => {
+                return Err(ParseError {
+                    message: "Expected entropy variable name".to_string(),
+                    span: self
+                        .current()
+                        .map(|t| (t.span.start, t.span.end))
+                        .unwrap_or((0, 0)),
+                });
+            }
+        };
+
+        self.expect(TokenKind::Colon)?;
+
+        let ty = Box::new(self.parse_type()?);
+
+        self.expect(TokenKind::Eq)?;
+
+        let initial_entropy = if self.current_kind() == TokenKind::Uninitialized {
+            self.pos += 1;
+            EntropyState::Uninitialized
+        } else if self.current_kind() == TokenKind::Initialized {
+            self.pos += 1;
+            EntropyState::Initialized
+        } else if self.current_kind() == TokenKind::Tainted {
+            self.pos += 1;
+            EntropyState::Tainted
+        } else {
+            EntropyState::Uninitialized
+        };
+
+        self.expect(TokenKind::Semi)?;
+
+        Ok(Item::EntropyDecl(EntropyDecl {
+            name,
+            ty,
+            initial_entropy,
+        }))
     }
 }

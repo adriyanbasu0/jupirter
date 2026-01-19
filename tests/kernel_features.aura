@@ -1,0 +1,15 @@
+// Aura Language Features Demonstration
+
+capability PageTables: paddr(0xFFFF_8000_0000_0000)[1GiB]:rw;
+
+topology Node0Memory: numa(0); cache(L3); memory(Normal);
+
+bitregion HWControlRegister: u32 {
+    enable: bits[0..1] rw;
+}
+
+entropy SecureKey: u64 = initialized;
+
+fn main() -> i32 {
+    return 42;
+}

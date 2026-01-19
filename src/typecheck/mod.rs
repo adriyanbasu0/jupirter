@@ -1,4 +1,5 @@
 use crate::ast::*;
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug)]
@@ -26,10 +27,12 @@ struct TypeContext {
     struct_types: HashMap<String, Struct>,
     union_types: HashMap<String, Union>,
     enum_types: HashMap<String, Enum>,
+    capability_types: HashMap<String, PhysAddrType>,
+    topology_types: HashMap<String, MemoryTopology>,
+    bit_region_types: HashMap<String, BitRegionType>,
+    entropy_types: HashMap<String, EntropyType>,
     current_function: Option<String>,
 }
-
-type HashMap<K, V> = std::collections::HashMap<K, V>;
 
 impl TypeContext {
     fn new() -> Self {
@@ -38,6 +41,10 @@ impl TypeContext {
             struct_types: HashMap::new(),
             union_types: HashMap::new(),
             enum_types: HashMap::new(),
+            capability_types: HashMap::new(),
+            topology_types: HashMap::new(),
+            bit_region_types: HashMap::new(),
+            entropy_types: HashMap::new(),
             current_function: None,
         };
         ctx.push_scope();
@@ -115,22 +122,22 @@ impl TypeContext {
             }
             Item::Const(c) => self.typecheck_const_decl(c, true),
             Item::Var(v) => self.typecheck_var_decl(v, true),
+            Item::CapabilityDecl(c) => self.typecheck_capability_decl(c),
+            Item::TopologyDecl(t) => self.typecheck_topology_decl(t),
+            Item::BitRegionDecl(b) => self.typecheck_bit_region_decl(b),
+            Item::EntropyDecl(e) => self.typecheck_entropy_decl(e),
         }
     }
 
     fn typecheck_function(&mut self, f: &Function) -> Result<(), TypeError> {
         let prev_fn = self.current_function.replace(f.name.clone());
-
         self.push_scope();
-
         for param in &f.params {
             self.add_variable(param.name.clone(), *param.ty.clone(), true);
         }
-
         for stmt in &f.body {
             self.typecheck_stmt(stmt)?;
         }
-
         self.pop_scope();
         self.current_function = prev_fn;
         Ok(())
@@ -138,7 +145,6 @@ impl TypeContext {
 
     fn typecheck_const_decl(&mut self, c: &ConstDecl, _global: bool) -> Result<(), TypeError> {
         let value_type = self.typecheck_expr(&c.value)?;
-
         if let Some(expected_ty) = &c.ty {
             if **expected_ty != value_type {
                 return Err(TypeError {
@@ -150,13 +156,11 @@ impl TypeContext {
                 });
             }
         }
-
         Ok(())
     }
 
     fn typecheck_var_decl(&mut self, v: &VarDecl, _global: bool) -> Result<(), TypeError> {
         let value_type = self.typecheck_expr(&v.value)?;
-
         if let Some(expected_ty) = &v.ty {
             if **expected_ty != value_type {
                 return Err(TypeError {
@@ -168,7 +172,54 @@ impl TypeContext {
                 });
             }
         }
+        Ok(())
+    }
 
+    fn typecheck_capability_decl(&mut self, c: &CapabilityDecl) -> Result<(), TypeError> {
+        let phys_type = PhysAddrType {
+            base_address: c.base_address,
+            length: c.length,
+            mode: c.mode.clone(),
+            element_type: c.element_type.clone(),
+        };
+        self.capability_types
+            .insert(c.name.clone(), phys_type.clone());
+        self.add_variable(c.name.clone(), Type::PhysAddr(phys_type), true);
+        Ok(())
+    }
+
+    fn typecheck_topology_decl(&mut self, t: &TopologyDecl) -> Result<(), TypeError> {
+        self.topology_types
+            .insert(t.name.clone(), t.topology.clone());
+        let topo_type = Type::Topology(
+            TopologyType {
+                topology: t.topology.clone(),
+            },
+            Box::new(Type::U64),
+        );
+        self.add_variable(t.name.clone(), topo_type, true);
+        Ok(())
+    }
+
+    fn typecheck_bit_region_decl(&mut self, b: &BitRegionDecl) -> Result<(), TypeError> {
+        let region_type = BitRegionType {
+            base_type: b.base_type.clone(),
+            regions: b.regions.clone(),
+        };
+        self.bit_region_types
+            .insert(b.name.clone(), region_type.clone());
+        self.add_variable(b.name.clone(), Type::BitRegion(region_type), true);
+        Ok(())
+    }
+
+    fn typecheck_entropy_decl(&mut self, e: &EntropyDecl) -> Result<(), TypeError> {
+        let entropy_type = EntropyType {
+            base_type: e.ty.clone(),
+            state: e.initial_entropy.clone(),
+        };
+        self.entropy_types
+            .insert(e.name.clone(), entropy_type.clone());
+        self.add_variable(e.name.clone(), Type::Entropy(entropy_type), true);
         Ok(())
     }
 
@@ -199,12 +250,12 @@ impl TypeContext {
             Stmt::For(f) => self.typecheck_for_stmt(f),
             Stmt::Asm(_) => Ok(()),
             Stmt::Defer(d) => self.typecheck_stmt(d),
+            Stmt::EntropyAssert(ea) => self.typecheck_entropy_assert(ea),
         }
     }
 
     fn typecheck_let_stmt(&mut self, l: &LetStmt) -> Result<(), TypeError> {
         let value_type = self.typecheck_expr(&l.value)?;
-
         if let Some(expected_ty) = &l.ty {
             if **expected_ty != value_type {
                 return Err(TypeError {
@@ -216,14 +267,12 @@ impl TypeContext {
                 });
             }
         }
-
-        self.add_variable(l.name.clone(), value_type, false);
+        self.add_variable(l.name.clone(), value_type, l.is_const);
         Ok(())
     }
 
     fn typecheck_const_stmt(&mut self, c: &ConstStmt) -> Result<(), TypeError> {
         let value_type = self.typecheck_expr(&c.value)?;
-
         if let Some(expected_ty) = &c.ty {
             if **expected_ty != value_type {
                 return Err(TypeError {
@@ -235,7 +284,6 @@ impl TypeContext {
                 });
             }
         }
-
         self.add_variable(c.name.clone(), value_type, true);
         Ok(())
     }
@@ -248,17 +296,14 @@ impl TypeContext {
                 location: "if condition".to_string(),
             });
         }
-
         for stmt in &if_stmt.then_branch {
             self.typecheck_stmt(stmt)?;
         }
-
         if let Some(else_branch) = &if_stmt.else_branch {
             for stmt in else_branch {
                 self.typecheck_stmt(stmt)?;
             }
         }
-
         Ok(())
     }
 
@@ -270,11 +315,9 @@ impl TypeContext {
                 location: "while condition".to_string(),
             });
         }
-
         for stmt in &w.body {
             self.typecheck_stmt(stmt)?;
         }
-
         Ok(())
     }
 
@@ -288,11 +331,33 @@ impl TypeContext {
             });
         }
         self.typecheck_stmt(&f.update)?;
-
         for stmt in &f.body {
             self.typecheck_stmt(stmt)?;
         }
+        Ok(())
+    }
 
+    fn typecheck_entropy_assert(&mut self, ea: &EntropyAssertStmt) -> Result<(), TypeError> {
+        let expr_ty = self.typecheck_expr(&ea.expr)?;
+        match &expr_ty {
+            Type::Entropy(entropy) => {
+                if entropy.state != ea.expected {
+                    return Err(TypeError {
+                        message: format!(
+                            "Entropy assertion failed: expected {:?}, got {:?}",
+                            ea.expected, entropy.state
+                        ),
+                        location: "entropy_assert".to_string(),
+                    });
+                }
+            }
+            _ => {
+                return Err(TypeError {
+                    message: "Entropy assert on non-entropy type".to_string(),
+                    location: "entropy_assert".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -312,6 +377,12 @@ impl TypeContext {
             Expr::Unary(op, e) => self.typecheck_unary(op, e),
             Expr::Binary(op, l, r) => self.typecheck_binary(op, l, r),
             Expr::Call(f, args) => self.typecheck_call(f, args),
+            Expr::Syscall(name, args) => {
+                for arg in args {
+                    self.typecheck_expr(arg)?;
+                }
+                Ok(Type::Isize)
+            }
             Expr::Index(arr, idx) => self.typecheck_index(arr, idx),
             Expr::Field(e, field) => self.typecheck_field(e, field),
             Expr::PtrField(e, field) => self.typecheck_ptr_field(e, field),
@@ -331,6 +402,13 @@ impl TypeContext {
                 let ptr_type = self.typecheck_expr(e)?;
                 match ptr_type {
                     Type::MutPtr(inner) | Type::ConstPtr(inner) => Ok(*inner),
+                    Type::PhysAddr(p) => {
+                        if let Some(elem) = p.element_type {
+                            Ok(*elem)
+                        } else {
+                            Ok(Type::U8)
+                        }
+                    }
                     _ => Err(TypeError {
                         message: format!("Cannot dereference non-pointer type {:?}", ptr_type),
                         location: "deref".to_string(),
@@ -357,12 +435,18 @@ impl TypeContext {
                 Ok(Type::Void)
             }
             Expr::If(if_expr) => self.typecheck_if_expr(if_expr),
-            Expr::Syscall(_method_name, args) => {
-                for arg in args {
-                    self.typecheck_expr(arg)?;
-                }
-                Ok(Type::Isize)
+            Expr::PhysAddr(p) => {
+                let phys_type = PhysAddrType {
+                    base_address: p.base_address,
+                    length: p.length,
+                    mode: p.mode.clone(),
+                    element_type: p.element_type.clone(),
+                };
+                Ok(Type::PhysAddr(phys_type))
             }
+            Expr::EntropyCheck(ec) => self.typecheck_entropy_check(ec),
+            Expr::BitRegionAccess(bra) => self.typecheck_bit_region_access(bra),
+            Expr::TopologyCast(tc) => self.typecheck_topology_cast(tc),
         }
     }
 
@@ -427,6 +511,13 @@ impl TypeContext {
             }
             UnaryOp::Deref => match ty {
                 Type::MutPtr(inner) | Type::ConstPtr(inner) => Ok(*inner),
+                Type::PhysAddr(p) => {
+                    if let Some(elem) = p.element_type {
+                        Ok(*elem)
+                    } else {
+                        Ok(Type::U8)
+                    }
+                }
                 _ => Err(TypeError {
                     message: format!("Cannot dereference non-pointer type {:?}", ty),
                     location: "deref".to_string(),
@@ -488,9 +579,9 @@ impl TypeContext {
             | BinaryOp::Gt
             | BinaryOp::LtEq
             | BinaryOp::GtEq => {
-                if left.is_integer() && right.is_integer() {
-                    Ok(Type::Bool)
-                } else if left.is_float() && right.is_float() {
+                if (left.is_integer() || left.is_float())
+                    && (right.is_integer() || right.is_float())
+                {
                     Ok(Type::Bool)
                 } else {
                     Err(TypeError {
@@ -581,6 +672,20 @@ impl TypeContext {
                     })
                 }
             }
+            Type::PhysAddr(p) => {
+                if idx_type.is_integer() {
+                    if let Some(elem) = p.element_type {
+                        Ok(*elem)
+                    } else {
+                        Ok(Type::U8)
+                    }
+                } else {
+                    Err(TypeError {
+                        message: format!("Physical capability index must be integer"),
+                        location: "physaddr index".to_string(),
+                    })
+                }
+            }
             _ => Err(TypeError {
                 message: format!("Cannot index non-array/non-pointer type {:?}", arr_type),
                 location: "array index".to_string(),
@@ -609,6 +714,17 @@ impl TypeContext {
                         location: format!(".{}", field),
                     })
                 }
+            }
+            Type::BitRegion(br) => {
+                for r in &br.regions {
+                    if r.name == field {
+                        return Ok(Type::U32);
+                    }
+                }
+                Err(TypeError {
+                    message: format!("Bit region {} has no field {}", br.base_type.size(), field),
+                    location: format!(".{}", field),
+                })
             }
             _ => Err(TypeError {
                 message: format!("Cannot access field on non-struct type {:?}", base_type),
@@ -662,7 +778,7 @@ impl TypeContext {
         match l {
             Expr::Identifier(name) => {
                 if let Some((_, is_const_binding)) = self.lookup_variable(name) {
-                    if *is_const_binding {
+                    if !*is_const_binding {
                         if left_type == right_type {
                             Ok(Type::Void)
                         } else {
@@ -759,5 +875,56 @@ impl TypeContext {
                 location: "if expression".to_string(),
             })
         }
+    }
+
+    fn typecheck_entropy_check(&mut self, ec: &EntropyCheckExpr) -> Result<Type, TypeError> {
+        let ty = self.typecheck_expr(&ec.expr)?;
+        match &ty {
+            Type::Entropy(entropy) => {
+                if entropy.state == ec.expected {
+                    Ok(Type::Bool)
+                } else {
+                    Ok(Type::Bool)
+                }
+            }
+            _ => Err(TypeError {
+                message: "Entropy check on non-entropy type".to_string(),
+                location: "entropy_check".to_string(),
+            }),
+        }
+    }
+
+    fn typecheck_bit_region_access(
+        &mut self,
+        bra: &BitRegionAccessExpr,
+    ) -> Result<Type, TypeError> {
+        let base_ty = self.typecheck_expr(&bra.base)?;
+        match &base_ty {
+            Type::BitRegion(br) => {
+                for region in &br.regions {
+                    if region.name == bra.region_name {
+                        return Ok(Type::U32);
+                    }
+                }
+                Err(TypeError {
+                    message: format!("No bit region {}", bra.region_name),
+                    location: "bit_region_access".to_string(),
+                })
+            }
+            _ => Err(TypeError {
+                message: "Bit region access on non-bit-region type".to_string(),
+                location: "bit_region_access".to_string(),
+            }),
+        }
+    }
+
+    fn typecheck_topology_cast(&mut self, tc: &TopologyCastExpr) -> Result<Type, TypeError> {
+        self.typecheck_expr(&tc.expr)?;
+        Ok(Type::Topology(
+            TopologyType {
+                topology: tc.target_topology.clone(),
+            },
+            Box::new(self.typecheck_expr(&tc.expr)?),
+        ))
     }
 }

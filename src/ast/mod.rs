@@ -11,6 +11,10 @@ pub enum Item {
     Enum(Enum),
     Const(ConstDecl),
     Var(VarDecl),
+    CapabilityDecl(CapabilityDecl),
+    TopologyDecl(TopologyDecl),
+    BitRegionDecl(BitRegionDecl),
+    EntropyDecl(EntropyDecl),
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +45,7 @@ pub enum FunctionAttribute {
 pub struct Struct {
     pub name: String,
     pub fields: Vec<StructField>,
+    pub topology: Option<MemoryTopology>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +93,106 @@ pub struct VarDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct CapabilityDecl {
+    pub name: String,
+    pub base_address: u64,
+    pub length: u64,
+    pub mode: CapabilityMode,
+    pub element_type: Option<Box<Type>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CapabilityMode {
+    Read,
+    Write,
+    ReadWrite,
+    Execute,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopologyDecl {
+    pub name: String,
+    pub topology: MemoryTopology,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryTopology {
+    pub numa_node: Option<u8>,
+    pub cache_level: Option<CacheLevel>,
+    pub memory_class: Option<MemoryClass>,
+    pub coherency: Option<CoherencyType>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CacheLevel {
+    L1,
+    L2,
+    L3,
+    L4,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemoryClass {
+    Device,
+    DMA,
+    DMAcoherent,
+    Framebuffer,
+    Encrypted,
+    Normal,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoherencyType {
+    Local,
+    RemoteValid,
+    Invalidated,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitRegionDecl {
+    pub name: String,
+    pub base_type: Box<Type>,
+    pub regions: Vec<BitRegion>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BitRegion {
+    pub name: String,
+    pub bit_offset: u8,
+    pub bit_width: u8,
+    pub access: BitAccess,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BitAccess {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntropyDecl {
+    pub name: String,
+    pub ty: Box<Type>,
+    pub initial_entropy: EntropyState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntropyState {
+    Uninitialized,
+    Initialized,
+    Tainted,
+    Partial(Vec<BitState>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BitState {
+    Initialized(bool),
+    Uninitialized,
+    Tainted,
+}
+
+#[derive(Debug, Clone)]
 pub enum Stmt {
     Let(LetStmt),
     Const(ConstStmt),
@@ -101,6 +206,13 @@ pub enum Stmt {
     For(ForStmt),
     Asm(AsmStmt),
     Defer(Box<Stmt>),
+    EntropyAssert(EntropyAssertStmt),
+}
+
+#[derive(Debug, Clone)]
+pub struct EntropyAssertStmt {
+    pub expr: Box<Expr>,
+    pub expected: EntropyState,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +287,37 @@ pub enum Expr {
     If(Box<IfExpr>),
     Alloc(Box<Type>, Box<Expr>),
     Free(Box<Expr>, Box<Expr>),
+    PhysAddr(PhysAddrExpr),
+    EntropyCheck(EntropyCheckExpr),
+    BitRegionAccess(BitRegionAccessExpr),
+    TopologyCast(TopologyCastExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysAddrExpr {
+    pub base_address: u64,
+    pub length: u64,
+    pub mode: CapabilityMode,
+    pub element_type: Option<Box<Type>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EntropyCheckExpr {
+    pub expr: Box<Expr>,
+    pub expected: EntropyState,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitRegionAccessExpr {
+    pub base: Box<Expr>,
+    pub region_name: String,
+    pub is_write: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopologyCastExpr {
+    pub expr: Box<Expr>,
+    pub target_topology: MemoryTopology,
 }
 
 #[derive(Debug, Clone)]
@@ -266,10 +409,39 @@ pub enum Type {
     Ptr(Box<Type>),
     MutPtr(Box<Type>),
     ConstPtr(Box<Type>),
+    PhysAddr(PhysAddrType),
     Array(usize, Box<Type>),
     Func(Vec<Type>, Box<Type>),
+    Entropy(EntropyType),
+    BitRegion(BitRegionType),
+    Topology(TopologyType, Box<Type>),
     Named(String),
     Error,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhysAddrType {
+    pub base_address: u64,
+    pub length: u64,
+    pub mode: CapabilityMode,
+    pub element_type: Option<Box<Type>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntropyType {
+    pub base_type: Box<Type>,
+    pub state: EntropyState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BitRegionType {
+    pub base_type: Box<Type>,
+    pub regions: Vec<BitRegion>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TopologyType {
+    pub topology: MemoryTopology,
 }
 
 impl Type {
@@ -297,8 +469,20 @@ impl Type {
                 }
             }
             Type::Ptr(_) | Type::MutPtr(_) | Type::ConstPtr(_) => 8,
+            Type::PhysAddr(p) => {
+                if let Some(elem) = &p.element_type {
+                    let elem_size = elem.size();
+                    let count = p.length / elem_size as u64;
+                    count as usize * elem_size
+                } else {
+                    8 // Base pointer size
+                }
+            }
             Type::Array(n, t) => *n * t.size(),
             Type::Func(_, _) => 8,
+            Type::Entropy(e) => e.base_type.size(),
+            Type::BitRegion(b) => b.base_type.size(),
+            Type::Topology(_, t) => t.size(),
             Type::Named(_) => 0,
             Type::Error => 0,
         }
@@ -328,8 +512,18 @@ impl Type {
                 }
             }
             Type::Ptr(_) | Type::MutPtr(_) | Type::ConstPtr(_) => 8,
+            Type::PhysAddr(p) => {
+                if let Some(elem) = &p.element_type {
+                    elem.align()
+                } else {
+                    8
+                }
+            }
             Type::Array(_, t) => t.align(),
             Type::Func(_, _) => 1,
+            Type::Entropy(e) => e.base_type.align(),
+            Type::BitRegion(b) => b.base_type.align(),
+            Type::Topology(_, t) => t.align(),
             Type::Named(_) => 1,
             Type::Error => 1,
         }
@@ -358,5 +552,17 @@ impl Type {
 
     pub fn is_pointer(&self) -> bool {
         matches!(self, Type::Ptr(_) | Type::MutPtr(_) | Type::ConstPtr(_))
+    }
+
+    pub fn is_physical_capability(&self) -> bool {
+        matches!(self, Type::PhysAddr(_))
+    }
+
+    pub fn is_entropy_type(&self) -> bool {
+        matches!(self, Type::Entropy(_))
+    }
+
+    pub fn is_bit_region_type(&self) -> bool {
+        matches!(self, Type::BitRegion(_))
     }
 }

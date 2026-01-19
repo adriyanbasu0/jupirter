@@ -1,1 +1,0 @@
-/home/adriyan/behead/target/debug/libaura_compiler.rlib: /home/adriyan/behead/src/ast/mod.rs /home/adriyan/behead/src/codegen/binary.rs /home/adriyan/behead/src/codegen/mod.rs /home/adriyan/behead/src/lexer/mod.rs /home/adriyan/behead/src/lib.rs /home/adriyan/behead/src/parser/mod.rs /home/adriyan/behead/src/typecheck/mod.rs

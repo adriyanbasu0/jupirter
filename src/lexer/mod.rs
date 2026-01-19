@@ -77,6 +77,40 @@ pub enum TokenKind {
     Alloc,
     #[token("free")]
     Free,
+    #[token("capability")]
+    Capability,
+    #[token("topology")]
+    Topology,
+    #[token("bitregion")]
+    BitRegion,
+    #[token("entropy")]
+    Entropy,
+    #[token("paddr")]
+    PAddr,
+    #[token("numa")]
+    Numa,
+    #[token("bits")]
+    Bits,
+    #[token("uninitialized")]
+    Uninitialized,
+    #[token("initialized")]
+    Initialized,
+    #[token("tainted")]
+    Tainted,
+    #[token("KiB")]
+    KiB,
+    #[token("MiB")]
+    MiB,
+    #[token("GiB")]
+    GiB,
+    #[token("TiB")]
+    TiB,
+    #[token("PiB")]
+    PiB,
+    #[token("memory")]
+    Memory,
+    #[token("cache")]
+    Cache,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*")]
     Identifier,
@@ -245,6 +279,23 @@ impl fmt::Display for TokenKind {
             TokenKind::Defer => write!(f, "defer"),
             TokenKind::Alloc => write!(f, "alloc"),
             TokenKind::Free => write!(f, "free"),
+            TokenKind::Capability => write!(f, "capability"),
+            TokenKind::Topology => write!(f, "topology"),
+            TokenKind::BitRegion => write!(f, "bitregion"),
+            TokenKind::Entropy => write!(f, "entropy"),
+            TokenKind::PAddr => write!(f, "paddr"),
+            TokenKind::Numa => write!(f, "numa"),
+            TokenKind::Bits => write!(f, "bits"),
+            TokenKind::Uninitialized => write!(f, "uninitialized"),
+            TokenKind::Initialized => write!(f, "initialized"),
+            TokenKind::Tainted => write!(f, "tainted"),
+            TokenKind::KiB => write!(f, "KiB"),
+            TokenKind::MiB => write!(f, "MiB"),
+            TokenKind::GiB => write!(f, "GiB"),
+            TokenKind::TiB => write!(f, "TiB"),
+            TokenKind::PiB => write!(f, "PiB"),
+            TokenKind::Memory => write!(f, "memory"),
+            TokenKind::Cache => write!(f, "cache"),
             TokenKind::Identifier => write!(f, "identifier"),
             TokenKind::Integer => write!(f, "integer"),
             TokenKind::HexInteger => write!(f, "hex integer"),

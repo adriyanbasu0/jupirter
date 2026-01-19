@@ -9,44 +9,84 @@ pub fn write_aura_binary(
 ) -> std::io::Result<()> {
     let mut file = File::create(path)?;
 
+    let header_size = std::mem::size_of::<AuraBinaryHeader>();
+    let text_offset = header_size as u64;
+    let aligned_text_size = align_to(object.text.len(), 16);
+    let data_offset = text_offset + aligned_text_size as u64;
+    let aligned_data_size = align_to(object.data.len(), 16);
+
+    let reloc_offset = data_offset + aligned_data_size as u64;
+    let symbol_offset = reloc_offset + object.relocations.len() as u64 * 280;
+    let cap_offset = symbol_offset + object.symbols.len() as u64 * 280;
+    let topo_offset = cap_offset + object.capability_sections.len() as u64 * 280;
+    let br_offset = topo_offset + object.topology_sections.len() as u64 * 280;
+
     let header = AuraBinaryHeader {
         magic: *b"AURA",
-        version: 1,
+        version: 2,
         flags: 0,
         reserved: 0,
         entry_point: object.entry_point,
         stack_size: 4096,
-        text_offset: std::mem::size_of::<AuraBinaryHeader>() as u64,
+        text_offset,
         text_size: object.text.len() as u64,
-        data_offset: (std::mem::size_of::<AuraBinaryHeader>() + align_to(object.text.len(), 16))
-            as u64,
+        data_offset,
         data_size: object.data.len() as u64,
         bss_size: object.bss_size as u64,
         reloc_count: object.relocations.len() as u64,
         symbol_count: object.symbols.len() as u64,
+        capability_count: object.capability_sections.len() as u64,
+        topology_count: object.topology_sections.len() as u64,
+        bitregion_count: object.bit_region_sections.len() as u64,
     };
 
     file.write_all(&header.as_bytes())?;
-    file.write_all(&object.text)?;
 
-    let text_pad = align_to(object.text.len(), 16) - object.text.len();
-    if text_pad > 0 {
-        file.write_all(&vec![0u8; text_pad])?;
+    let mut written = header_size;
+    file.write_all(&object.text)?;
+    written += object.text.len();
+
+    if aligned_text_size > object.text.len() {
+        file.write_all(&vec![0u8; aligned_text_size - object.text.len()])?;
+        written += aligned_text_size - object.text.len();
     }
 
     file.write_all(&object.data)?;
+    written += object.data.len();
 
-    let data_pad = align_to(object.data.len(), 16) - object.data.len();
-    if data_pad > 0 {
-        file.write_all(&vec![0u8; data_pad])?;
+    if aligned_data_size > object.data.len() {
+        file.write_all(&vec![0u8; aligned_data_size - object.data.len()])?;
+        written += aligned_data_size - object.data.len();
     }
 
     for reloc in &object.relocations {
-        file.write_all(&reloc.as_bytes())?;
+        let mut bytes = reloc.as_bytes();
+        bytes.resize(280, 0);
+        file.write_all(&bytes)?;
     }
 
     for sym in &object.symbols {
-        file.write_all(&sym.as_bytes())?;
+        let mut bytes = sym.as_bytes();
+        bytes.resize(280, 0);
+        file.write_all(&bytes)?;
+    }
+
+    for cap in &object.capability_sections {
+        let mut bytes = cap.as_bytes();
+        bytes.resize(280, 0);
+        file.write_all(&bytes)?;
+    }
+
+    for topo in &object.topology_sections {
+        let mut bytes = topo.as_bytes();
+        bytes.resize(280, 0);
+        file.write_all(&bytes)?;
+    }
+
+    for br in &object.bit_region_sections {
+        let mut bytes = br.as_bytes();
+        bytes.resize(280, 0);
+        file.write_all(&bytes)?;
     }
 
     Ok(())
@@ -75,6 +115,9 @@ struct AuraBinaryHeader {
     bss_size: u64,
     reloc_count: u64,
     symbol_count: u64,
+    capability_count: u64,
+    topology_count: u64,
+    bitregion_count: u64,
 }
 
 impl AuraBinaryHeader {
@@ -93,6 +136,9 @@ impl AuraBinaryHeader {
         bytes.extend_from_slice(&self.bss_size.to_le_bytes());
         bytes.extend_from_slice(&self.reloc_count.to_le_bytes());
         bytes.extend_from_slice(&self.symbol_count.to_le_bytes());
+        bytes.extend_from_slice(&self.capability_count.to_le_bytes());
+        bytes.extend_from_slice(&self.topology_count.to_le_bytes());
+        bytes.extend_from_slice(&self.bitregion_count.to_le_bytes());
         bytes
     }
 }
@@ -120,6 +166,98 @@ impl Symbol {
         bytes.extend_from_slice(&self.offset.to_le_bytes());
         bytes.extend_from_slice(&self.size.to_le_bytes());
         bytes.push(self.kind.clone() as u8);
+        bytes
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CapabilitySection {
+    pub name: String,
+    pub base_address: u64,
+    pub length: u64,
+    pub mode: u8,
+    pub element_size: u32,
+    pub element_count: u64,
+}
+
+impl CapabilitySection {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let name_len = (self.name.len() as u64).to_le_bytes();
+        bytes.extend_from_slice(&name_len);
+        bytes.extend_from_slice(self.name.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&self.base_address.to_le_bytes());
+        bytes.extend_from_slice(&self.length.to_le_bytes());
+        bytes.push(self.mode);
+        bytes.extend_from_slice(&self.element_size.to_le_bytes());
+        bytes.extend_from_slice(&self.element_count.to_le_bytes());
+        bytes
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TopologySection {
+    pub name: String,
+    pub numa_node: u8,
+    pub cache_level: u8,
+    pub memory_class: u8,
+}
+
+impl TopologySection {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let name_len = (self.name.len() as u64).to_le_bytes();
+        bytes.extend_from_slice(&name_len);
+        bytes.extend_from_slice(self.name.as_bytes());
+        bytes.push(0);
+        bytes.push(self.numa_node);
+        bytes.push(self.cache_level);
+        bytes.push(self.memory_class);
+        bytes
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BitRegionSection {
+    pub name: String,
+    pub base_type: String,
+    pub regions: Vec<BitRegionInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BitRegionInfo {
+    pub name: String,
+    pub bit_offset: u8,
+    pub bit_width: u8,
+    pub access: u8,
+}
+
+impl BitRegionSection {
+    pub fn as_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let name_len = (self.name.len() as u64).to_le_bytes();
+        bytes.extend_from_slice(&name_len);
+        bytes.extend_from_slice(self.name.as_bytes());
+        bytes.push(0);
+
+        let base_type_len = (self.base_type.len() as u64).to_le_bytes();
+        bytes.extend_from_slice(&base_type_len);
+        bytes.extend_from_slice(self.base_type.as_bytes());
+        bytes.push(0);
+
+        bytes.extend_from_slice(&(self.regions.len() as u64).to_le_bytes());
+
+        for region in &self.regions {
+            let region_name_len = (region.name.len() as u64).to_le_bytes();
+            bytes.extend_from_slice(&region_name_len);
+            bytes.extend_from_slice(region.name.as_bytes());
+            bytes.push(0);
+            bytes.push(region.bit_offset);
+            bytes.push(region.bit_width);
+            bytes.push(region.access);
+        }
+
         bytes
     }
 }
@@ -154,19 +292,15 @@ impl AuraBinary {
         println!("BSS Size: {}", header.bss_size);
         println!("Relocations: {}", header.reloc_count);
         println!("Symbols: {}", header.symbol_count);
+        println!("Capabilities: {}", header.capability_count);
+        println!("Topology Sections: {}", header.topology_count);
+        println!("Bit Region Sections: {}", header.bitregion_count);
 
         let text_start = header.text_offset as usize;
         let text_end = text_start + header.text_size as usize;
         if text_end <= data.len() && header.text_size > 0 {
             println!("\n=== Text Section ({} bytes) ===", header.text_size);
             Self::print_hex(&data[text_start..text_end]);
-        }
-
-        let data_start = header.data_offset as usize;
-        let data_end = data_start + header.data_size as usize;
-        if data_end <= data.len() && header.data_size > 0 {
-            println!("\n=== Data Section ({} bytes) ===", header.data_size);
-            Self::print_hex(&data[data_start..data_end]);
         }
 
         Ok(())
@@ -232,6 +366,18 @@ impl AuraBinaryHeader {
 
         let mut symbol_count = [0u8; 8];
         symbol_count.copy_from_slice(&data[pos..pos + 8]);
+        pos += 8;
+
+        let mut capability_count = [0u8; 8];
+        capability_count.copy_from_slice(&data[pos..pos + 8]);
+        pos += 8;
+
+        let mut topology_count = [0u8; 8];
+        topology_count.copy_from_slice(&data[pos..pos + 8]);
+        pos += 8;
+
+        let mut bitregion_count = [0u8; 8];
+        bitregion_count.copy_from_slice(&data[pos..pos + 8]);
 
         AuraBinaryHeader {
             magic,
@@ -247,6 +393,9 @@ impl AuraBinaryHeader {
             bss_size: u64::from_le_bytes(bss_size),
             reloc_count: u64::from_le_bytes(reloc_count),
             symbol_count: u64::from_le_bytes(symbol_count),
+            capability_count: u64::from_le_bytes(capability_count),
+            topology_count: u64::from_le_bytes(topology_count),
+            bitregion_count: u64::from_le_bytes(bitregion_count),
         }
     }
 }

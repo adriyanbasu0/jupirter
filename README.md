@@ -151,31 +151,6 @@ N       M     Data Section (initialized data)
 - Return: %rax (integer), %xmm0 (float)
 - Callee-saved: %rbx, %r12, %r13, %r14, %r15, %rbp
 
-## Project Structure
-
-```
-/home/adriyan/behead/
-├── Cargo.toml           # Rust project config
-├── LANGUAGE_SPEC.md     # Language specification
-├── README.md            # This file
-├── build.sh             # Build script
-├── src/
-│   ├── main.rs          # CLI entry point
-│   ├── lib.rs           # Compiler library
-│   ├── lexer/           # Lexical analysis
-│   ├── parser/          # Parsing
-│   ├── ast/             # AST definitions
-│   ├── typecheck/       # Type checking
-│   └── codegen/         # Code generation
-├── bin/      # Zig binary builder
-│   └── auraload/        # C runtime loader
-├── lib/
-│   └── trampoline/      # Assembly trampoline
-└── tests/
-    └── hello.aura       # Example program
-
-```
-
 ## Non-Goals (Explicitly Forbidden)
 
 - ❌ Garbage collection
