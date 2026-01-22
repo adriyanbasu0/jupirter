@@ -42,11 +42,9 @@ Rust Compiler Frontend (lexer → parser → typecheck)
     ↓
 Machine Code Generator (x86_64)
     ↓
-Zig Binary Builder (or Rust fallback)
-    ↓
 Custom Aura Binary (.aura)
     ↓
-C Runtime Loader (auraload)
+zig runner 
     ↓
 Assembly Trampoline
     ↓
@@ -58,11 +56,6 @@ Program Execution
 ```bash
 # Full build
 ./build.sh
-
-# Or step by step:
-cargo build --release
-gcc -static -O2 -o bin/auraload bin/auraload/main.c
-gcc -c -o lib/trampoline/trampoline.o lib/trampoline/trampoline.S
 ```
 
 ## Usage

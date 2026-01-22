@@ -9,11 +9,9 @@ cd /home/adriyan/behead
 echo "Building Rust compiler..."
 cargo build --release
 
-# Build C loader
-echo "Building C loader (auraload)..."
-gcc -static -O2 -o bin/auraload/auraload bin/auraload/main.c lib/trampoline/trampoline.o 2>/dev/null || \
-    (gcc -c -o lib/trampoline/trampoline.o lib/trampoline/trampoline.S && \
-     gcc -static -O2 -o bin/auraload/auraload bin/auraload/main.c lib/trampoline/trampoline.o)
+# Build Zig loader
+echo "Building Zig loader (auraload)..."
+zig build-exe -O ReleaseFast bin/auraload/main.zig lib/trampoline/trampoline.o -femit-bin=bin/auraload/auraload
 
 # Build trampoline if not already built
 if [ ! -f "lib/trampoline/trampoline.o" ]; then
@@ -26,7 +24,7 @@ echo "=== Build Complete ==="
 echo ""
 echo "Binaries:"
 echo "  Rust compiler:   target/release/aura"
-echo "  C runtime:       bin/auraload/auraload"
+echo "  Zig runtime:     bin/auraload/auraload"
 echo "  Trampoline:      lib/trampoline/trampoline.o"
 echo ""
 echo "Running example program..."
