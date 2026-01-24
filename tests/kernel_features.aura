@@ -10,7 +10,7 @@ bitregion HWControlRegister: u32 {
 
 
 entropy SecureKey: u64 = initialized;
-
-fn main() -> i32 {
+@entry(main)
+ fn main() -> i32 {
     return 42;
 }

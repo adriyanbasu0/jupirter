@@ -288,15 +288,14 @@ pub fn main() !void {
         }
     }
 
-    const data_base_addr: usize = 0x1000000;
-    const data_addr = posix.mmap(@as([*]align(4096) u8, @ptrFromInt(data_base_addr)), header.data_size + page_size, posix.PROT.READ | posix.PROT.WRITE, .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true }, -1, 0) catch null;
-    if ((data_addr == null or data_addr.?.ptr != @as([*]align(4096) u8, @ptrFromInt(data_base_addr))) and header.data_size > 0) {
-        std.debug.print("Error: Cannot map data at fixed address\n", .{});
-        posix.munmap(code_slice);
-        return error.MmapFailed;
-    }
-
+    var data_addr: ?[]align(4096) u8 = null;
     if (header.data_size > 0) {
+        data_addr = posix.mmap(null, header.data_size + page_size, posix.PROT.READ | posix.PROT.WRITE, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0) catch {
+            std.debug.print("Error: Cannot map data section\n", .{});
+            posix.munmap(code_slice);
+            return error.MmapFailed;
+        };
+
         @memcpy(data_addr.?[0..header.data_size], @as([*]u8, @ptrFromInt(aligned_data))[0..header.data_size]);
     }
 

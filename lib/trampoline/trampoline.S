@@ -53,7 +53,7 @@ trampoline:
     popfq
 
     # Jump to entry point
-    call r12
+    jmp r12
 
     # Return from user program - RAX contains the exit code
     # Use syscall to exit with that code

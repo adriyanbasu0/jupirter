@@ -193,6 +193,7 @@ pub fn generate(typed_ast: &Program) -> Result<AuraObject, CodegenError> {
                 if let FunctionAttribute::Entry(Some(entry_name)) = attr {
                     codegen.entry_point_name = Some(entry_name.clone());
                 } else if let FunctionAttribute::Entry(None) = attr {
+                    println!("DEBUG: Setting entry point name to '{}'", f.name);
                     codegen.entry_point_name = Some(f.name.clone());
                 }
             }
@@ -468,6 +469,10 @@ impl CodeGenerator {
 
         if let Some(entry_name) = &self.entry_point_name {
             if f.name == *entry_name {
+                println!(
+                    "DEBUG: Setting entry point for function '{}' to offset {}",
+                    f.name, func_start
+                );
                 self.entry_point = func_start as u64;
             }
         }
